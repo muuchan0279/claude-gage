@@ -1,0 +1,6 @@
+# 実行時に生まれる個人データ(公開禁止)
+brave-profile/
+names.json
+__pycache__/
+*.pyc
+nohup.out

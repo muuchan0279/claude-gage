@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLAUDE GAGE</title>
+<style>
+  :root { --bg:#0d0d1a; --panel:#16162b; --dim:#8888aa; --pink:#ff3eb5; --cyan:#00f0ff; --green:#39ff14; --orange:#d97757; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:#fff; font-family:monospace; overflow:hidden; height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:16px; padding:10px 14px; background:var(--panel); border-bottom:2px solid var(--pink); }
+  header h1 { font-size:15px; color:var(--pink); letter-spacing:1px; }
+  .count { font-size:13px; color:var(--dim); }
+  .count b { font-size:20px; }
+  .count.working b { color:var(--orange); }
+  .count.idle b { color:var(--cyan); }
+  main { flex:1; display:flex; min-height:0; }
+  #tank { flex:1; position:relative; min-width:0; }
+  canvas { display:block; width:100%; height:100%; image-rendering:pixelated; cursor:pointer; }
+  /* CRT走査線 */
+  #tank::after { content:""; position:absolute; inset:0; pointer-events:none;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,.22) 0 1px, transparent 1px 3px); }
+  aside { width:min(300px, 38vw); background:var(--panel); border-left:2px solid #2a2a4a; padding:12px; font-size:12px;
+    display:flex; flex-direction:column; gap:8px; overflow-y:auto; }
+  aside h2 { font-size:12px; color:var(--cyan); border-bottom:1px solid #2a2a4a; padding-bottom:6px; }
+  /* スマホ縦持ち: 水槽下の余白に設定画面(ヘッダーの操作類がここへ引っ越してくる) */
+  /* スマホ縦持ち: 設定は右上⚙から開くドロップダウン */
+  #mset { display:none; position:fixed; right:8px; top:52px; width:min(340px, 88vw);
+    background:rgba(22,22,43,.97); border:1px solid #2a2a4a; border-radius:8px;
+    padding:12px; z-index:20; box-shadow:0 8px 24px rgba(0,0,0,.6); }
+  #mset.open { display:block; }
+  #mset h2 { font-size:12px; color:var(--cyan); margin-bottom:10px; letter-spacing:1px; }
+  #mset #ctrls { display:flex !important; flex-wrap:wrap; gap:10px; align-items:center; }
+  #mset .tgl { padding:10px 14px; font-size:14px; }
+  @media (max-width: 700px) {
+    /* SESSIONは水槽の下の空間を常設で使う(topはJSがゲージ底に追従させる) */
+    aside { position:fixed; left:0; right:0; bottom:0; top:45vh; width:100%;
+      border-left:none; border-top:2px solid var(--pink); z-index:5; font-size:13px;
+      padding-bottom:max(12px, env(safe-area-inset-bottom)); }
+    aside .btn { padding:10px 14px; font-size:14px; }
+    aside input { font-size:16px; }  /* 16px未満だとiOS/Android系でズームが暴発する */
+    header { gap:10px; padding:8px 34px 8px 10px; flex-wrap:wrap; position:relative; }
+    header h1 { font-size:13px; }
+    /* ⚙は流れから外して右上に小さく貼る(1個で1行ぶん食わないように) */
+    #btnMset { display:block !important; position:absolute; right:6px; top:6px;
+      padding:3px 7px; font-size:13px; line-height:1; }
+  }
+  aside .empty { color:var(--dim); }
+  .field b { color:var(--dim); display:block; font-size:10px; }
+  .field div { word-break:break-all; }
+  .sub { padding-left:10px; color:var(--dim); }
+  .sub .on { color:var(--green); }
+  .bubble { background:var(--bg); border:1px solid var(--dim); padding:8px; white-space:pre-wrap; word-break:break-word; max-height:180px; overflow-y:auto; }
+  .btn { font-family:monospace; font-size:12px; background:var(--bg); border:2px solid var(--dim); color:var(--dim);
+    padding:6px 10px; cursor:pointer; margin-top:4px; }
+  .btn.danger { border-color:var(--pink); color:var(--pink); }
+  .btn.yes { border-color:#ff4040; color:#ff4040; }
+  .confirmbox { border:2px solid var(--pink); padding:8px; margin-top:4px; }
+  .confirmbox p { color:var(--pink); margin-bottom:6px; }
+  .tgl { font-family:monospace; font-size:11px; background:var(--bg); border:2px solid #2a2a4a; color:var(--dim);
+    padding:4px 8px; cursor:pointer; margin-left:6px; }
+  .tgl.on { border-color:var(--green); color:var(--green); }
+  .sayrow { display:flex; gap:6px; margin-top:4px; }
+  .sayrow input { flex:1; background:var(--bg); border:2px solid var(--dim); color:#fff;
+    font-family:monospace; font-size:12px; padding:6px; min-width:0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>▣ CLAUDE GAGE <span id="ver" style="color:#8888aa;font-size:10px"></span></h1>
+  <span class="count working">WORKING <b id="nWork">0</b></span>
+  <span class="count idle">IDLE <b id="nIdle">0</b></span>
+  <span class="count">🐚 <b id="nShell" style="color:#c9a06a">0</b></span>
+  <span style="flex:1"></span>
+  <span id="ctrls" style="display:contents">
+    <span class="count" title="貝殻の表示上限">🐚上限
+      <input id="maxShell" type="number" min="0" max="50"
+        style="width:44px;background:#0d0d1a;color:#c9a06a;border:1px solid #2a2a4a;font-family:monospace;font-size:12px;padding:2px 4px;margin-left:4px"></span>
+    <button class="tgl" id="tglDesktop" title="デスクトップ放牧(母艦の画面上をClawdが歩く)">🖥放牧</button>
+    <button class="tgl" id="tglTool" title="ツール実況(いま何のツールを使ってるか)">⚙実況</button>
+    <button class="tgl" id="tglStuck" title="困ってる検知(busyのまま長時間無音)">💦困り</button>
+    <button class="tgl" id="tglSound" title="8bit効果音(発言ぴこっ/産まれポン/冬眠ぷくぷく)">🔊音</button>
+  </span>
+  <span class="count" id="err"></span>
+  <button class="tgl" id="btnMset" style="display:none">⚙</button>
+</header>
+<main>
+  <div id="tank"><canvas id="cv"></canvas>
+    <div id="mset"><h2>⚙ SETTINGS</h2></div>
+  </div>
+  <aside id="panel"><h2>SESSION</h2><div class="empty">Clawdをクリックすると詳細が出るよ</div></aside>
+</main>
+<script>
+// ── 公式Clawdスプライト(claudeバイナリ内 CLAWD_FRAMES / CLAWD_PAL をそのまま採用) ──
+const PAL = { O:'#d97757', D:'#2a1f1b', E:'#e98fa2', F:'#7d848a', P:'#e8b93c', W:'#d9a066', G:'#4a4a4a' };
+const WRITE_A = [
+'................','................','................','..OOOOOOOO......','..OOOOOOOO......',
+'..OODOODOO......','..OODOODOO......','..OOOOOOOOOEFPWG','..OOOOOOOO......','..OOOOOOOO......',
+'...OO..OO.......','...OO..OO.......','................','................'];
+const WRITE_B = [
+'................','..............WG','.............P..','..OOOOOOOO..P...','..OOOOOOOO.F....',
+'..OODOODOOE.....','..OODOODOOO.....','..OOOOOOOO......','..OOOOOOOO......','..OOOOOOOO......',
+'...OO..OO.......','...OO..OO.......','................','................'];
+const strip = g => g.map(r => r.replace(/[EFPWGb]/g, '.'));           // 鉛筆なし=素のClawd
+const blink = g => g.map((r,i) => (i===5||i===6) ? r.replace(/D/g,'O') : r); // まばたき
+const look = (g,d) => g.map((r,i) => (i===5||i===6)  // 目玉だけ左右にずらす(キョロキョロ)
+  ? r.replace('OODOODOO', d<0 ? 'ODOODOOO' : 'OOODOODO') : r);
+const IDLE_A = strip(WRITE_A), IDLE_BLINK = blink(IDLE_A);
+const LOOK_L = look(IDLE_A,-1), LOOK_R = look(IDLE_A,1);
+// 冬眠3態(貝殻)。パレット追加: S/w/s=貝・砂
+Object.assign(PAL, { S:'#8a5a3b', w:'#f0e0c0', s:'#c9a06a' });
+const SLEEP = IDLE_A.map((r,i) => i===5 ? r.replace(/D/g,'O') : i===6 ? r : r); // 目は下段だけ閉じ線に
+SLEEP[5] = SLEEP[5].replace(/D/g,'O');
+SLEEP[6] = '..ODDOODDO......';
+const BURIED = [
+'................','................','................','................',
+'..OOOOOOOO......','..OOOOOOOO......','..ODDOODDO......','..OOOOOOOO......',
+'ssssssssssssssss','sswsssswsssswsss','ssssssssssssssss','................',
+'................','................'];
+const CLAM = [
+'................','................','................','....wwwwwww.....',
+'...wsssssssw....','..wsswsswsssw...','..wsswsswsswsw..','..ssssssssssss..',
+'..SSSSSSSSSSSS..','...SSSSSSSSSS...','....SSSSSSSS....','................',
+'................','................'];
+
+const SW = 16, SH = 14;
+function bake(grid) {
+  const c = document.createElement('canvas'); c.width = SW; c.height = SH;
+  const x = c.getContext('2d');
+  grid.forEach((row,ry) => [...row].forEach((ch,rx) => {
+    if (PAL[ch]) { x.fillStyle = PAL[ch]; x.fillRect(rx,ry,1,1); }
+  }));
+  return c;
+}
+const SPR = { writeA:bake(WRITE_A), writeB:bake(WRITE_B), idle:bake(IDLE_A), blink:bake(IDLE_BLINK),
+              lookL:bake(LOOK_L), lookR:bake(LOOK_R),
+              sleep:bake(SLEEP), buried:bake(BURIED), clam:bake(CLAM) };
+const SHELL_STATES = { sleep:1, buried:1, clam:1 };
+
+// ── 飼育ケース ──
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let W=0, H=0, SCALE=4, SUBSCALE=2;
+function resize() {
+  W = cv.width = cv.parentElement.clientWidth;
+  H = cv.height = cv.parentElement.clientHeight;
+  // 窓の大きさに合わせてClawdの倍率を変える(狭いほど小さく)
+  SCALE = Math.max(2, Math.min(5, Math.floor(Math.min(W/180, H/110))));
+  SUBSCALE = Math.max(1, Math.round(SCALE/2));
+  // リサイズではみ出した住人を水槽内へ押し戻す
+  for (const c of critters.values()) {
+    const maxX = Math.max(20, W - SW*SCALE - 20);
+    c.x = Math.min(Math.max(c.x, 20), maxX);
+    c.tx = Math.min(Math.max(c.tx, 20), maxX);
+  }
+  // 縦持ちならヘッダーの操作類を水槽下の設定パネルへ引っ越し(戻る時は逆)
+  const pUI = H > W * 1.15;
+  const ctrls = document.getElementById('ctrls'), mset = document.getElementById('mset');
+  if (pUI && ctrls.parentElement !== mset) {
+    mset.appendChild(ctrls);
+  } else if (!pUI && ctrls.parentElement === mset) {
+    const err = document.getElementById('err');
+    err.parentElement.insertBefore(ctrls, err);
+    mset.classList.remove('open');
+    document.getElementById('panel').style.top = '';  // 横長に戻ったらCSS既定へ
+  }
+}
+document.getElementById('btnMset').addEventListener('click', () =>
+  document.getElementById('mset').classList.toggle('open'));
+addEventListener('resize', resize);
+
+const critters = new Map(); // sessionId -> critter
+let selected = null;
+resize();
+
+function spawnPos() { return { x: 60+Math.random()*(Math.max(W,200)-160), y: 0 }; }
+
+let firstLoad = true;
+function reconcile(data) {
+  const seen = new Set();
+  for (const s of data.sessions) {
+    seen.add(s.id);
+    let c = critters.get(s.id);
+    if (!c) {
+      c = { ...spawnPos(), tx:0, dir:1, phase:Math.random()*100, sess:s, bubbleUntil:0 };
+      c.tx = c.x;
+      critters.set(s.id, c);
+      if (!firstLoad && !SHELL_STATES[s.state]) sfx.spawn();
+    } else if (s.last_text && c.sess.last_text !== s.last_text) {
+      // 発言が変わった=会話が起きた → 吹き出しでしゃべる
+      c.bubble = s.last_text;
+      c.bubbleUntil = performance.now() + 10000;
+      sfx.say();
+    }
+    // 起きてる→貝殻に変わった瞬間
+    if (!SHELL_STATES[c.sess.state] && SHELL_STATES[s.state]) sfx.sink();
+    if (SHELL_STATES[c.sess.state] && !SHELL_STATES[s.state]) sfx.spawn(); // 復活!
+    // compact直後: 一度だけスッキリ祝い(キラキラ+吹き出し)
+    if (s.compact_age != null && s.compact_age < 300 && !c.compacted) {
+      c.compacted = true;
+      c.bubble = `✨スッキリ!${s.compact_saved_k}k軽くなった`;
+      c.bubbleUntil = performance.now() + 8000;
+      c.sparkleUntil = performance.now() + 20000;
+      sfx.spawn();
+    } else if (s.compact_age == null) c.compacted = false;
+    c.sess = s;
+  }
+  for (const id of [...critters.keys()]) if (!seen.has(id)) critters.delete(id);
+  // セッション間会話(SendMessage)のペアを双方向リンク化(受信側にはtalk_toが無いので)
+  for (const c of critters.values()) c.mateId = null;
+  for (const s of data.sessions) {
+    if (!s.talk_to || SHELL_STATES[s.state]) continue;
+    const a = critters.get(s.id), b = critters.get(s.talk_to);
+    if (a && b && b.sess && !SHELL_STATES[b.sess.state]) { a.mateId = s.talk_to; b.mateId = s.id; }
+  }
+  if (data.version) document.getElementById('ver').textContent = 'v' + data.version;
+  document.getElementById('tglDesktop').classList.toggle('on', !!data.desktop);
+  document.getElementById('nWork').textContent = data.working;
+  document.getElementById('nIdle').textContent = data.idle;
+  document.getElementById('nShell').textContent = data.sessions.filter(s => SHELL_STATES[s.state]).length;
+  if (selected && !seen.has(selected)) { selected = null; renderPanel(null); }
+  if (selected && !document.getElementById('sayText')?.matches(':focus')) renderPanel(critters.get(selected).sess);
+  firstLoad = false;
+}
+
+// ── トグル(localStorage永続) ──
+const toggles = {};
+for (const [key, id, def] of [['tool','tglTool',true], ['stuck','tglStuck',true], ['sound','tglSound',false]]) {
+  const btn = document.getElementById(id);
+  toggles[key] = (localStorage.getItem('tgl_'+key) ?? String(def)) === 'true';
+  btn.classList.toggle('on', toggles[key]);
+  btn.addEventListener('click', () => {
+    toggles[key] = !toggles[key];
+    localStorage.setItem('tgl_'+key, toggles[key]);
+    btn.classList.toggle('on', toggles[key]);
+    if (key === 'sound' && toggles.sound) initAudio(); // 音はユーザー操作起点で解禁
+  });
+}
+
+// ── デスクトップ放牧トグル(状態はサーバが真実源・3秒ポーリングで同期) ──
+document.getElementById('tglDesktop').addEventListener('click', async ev => {
+  const on = ev.currentTarget.classList.contains('on');
+  try {
+    await fetch(on ? '/api/desktop_stop' : '/api/desktop_start', { method:'POST' });
+    ev.currentTarget.classList.toggle('on', !on); // 楽観更新、次のSYNCで真値に戻る
+  } catch (e) {}
+});
+
+// ── 8bit効果音(Web Audio自前生成・依存ゼロ) ──
+let actx = null;
+function initAudio() { if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)(); }
+function beep(freqs, dur=0.06, type='square', vol=0.04) {
+  if (!toggles.sound || !actx) return;
+  let t0 = actx.currentTime;
+  for (const f of freqs) {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = f;
+    g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.001, t0+dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t0); o.stop(t0+dur);
+    t0 += dur;
+  }
+}
+const sfx = {
+  say:   () => beep([660, 880]),                    // 発言=ぴこっ
+  spawn: () => beep([330, 660], 0.05, 'sine'),       // 産まれ=ポン
+  sink:  () => beep([440, 300, 200], 0.09, 'sine'),  // 冬眠=ぷくぷく…
+};
+
+const TOOL_ICON = { Bash:'⚙', Read:'📖', Edit:'✏️', Write:'📝', WebFetch:'🌐', WebSearch:'🌐',
+  Agent:'🐣', Task:'🐣', Grep:'🔍', Glob:'🔍', TodoWrite:'📋', Skill:'📜' };
+
+const maxShellInput = document.getElementById('maxShell');
+maxShellInput.value = localStorage.getItem('maxShells') ?? 10;
+maxShellInput.addEventListener('change', () => {
+  localStorage.setItem('maxShells', maxShellInput.value);
+});
+
+async function poll() {
+  try {
+    const r = await fetch('/api/status?shells=' + (parseInt(maxShellInput.value) || 0));
+    reconcile(await r.json());
+    document.getElementById('err').textContent = '';
+  } catch (e) {
+    document.getElementById('err').textContent = '⚠ 接続断';
+  }
+  setTimeout(poll, 3000);
+}
+poll();
+
+// ── 描画ループ ──
+function draw(t) {
+  ctx.clearRect(0,0,W,H);
+  ctx.imageSmoothingEnabled = false;
+
+  // 貝殻ゾーンの高さを先に計算して、その分だけ歩く床を持ち上げる。
+  // 貝殻は横幅に収まるまで自動縮小して原則1列(スマホ縦持ちで2列に折り返して浮いて見えた対策)
+  const shellCount = [...critters.values()].filter(c => SHELL_STATES[c.sess.state]).length;
+  let sc = Math.max(2, SCALE-1);
+  if (shellCount) {
+    const fit = Math.floor(((W-32) / shellCount - 14) / SW);
+    sc = Math.max(1, Math.min(sc, fit));
+  }
+  const perRow = Math.max(1, Math.floor((W-32) / (SW*sc + 14)));
+  const shellRows = Math.ceil(shellCount / perRow);
+  const shellZone = shellRows ? shellRows * (SH*sc + 6) + 8 : 0;
+  // スマホ縦持ちは水槽ゾーンを上へ寄せる(下半分は詳細シートが来るし、下に押し込むと窮屈)
+  const portrait = H > W * 1.15;
+  const zbMin = SH*SCALE + shellZone + 130;
+  const zoneBottom = portrait
+    ? Math.min(H - 90, Math.max(zbMin, zbUser || Math.min(H*0.30, 360))) : H;
+  lastZB = portrait ? zoneBottom : 0;
+  const floorY = zoneBottom - 44 - SH*SCALE - shellZone;
+  // 縦持ち: SESSIONパネルの上端をゲージの底に追従させる(水槽の下は全部SESSION)。
+  // パネルはfixed=画面基準なので、キャンバスの画面上の位置(ヘッダー分)を足すこと
+  if (portrait) {
+    const pn = document.getElementById('panel');
+    const top = Math.round(cv.getBoundingClientRect().top + zoneBottom + 20);
+    if (pn._top !== top) { pn._top = top; pn.style.top = top + 'px'; }
+  }
+
+  // 歩く床のライン
+  ctx.fillStyle = '#16162b';
+  ctx.fillRect(0, floorY + SH*SCALE + 16, W, 3);
+
+  // 底の砂(冬眠フロア)
+  ctx.fillStyle = '#2a2118';
+  ctx.fillRect(0, zoneBottom-14, W, 14);
+  // 縦持ち: 砂ラインをドラッグでゲージの高さを変えられるグリップ
+  if (portrait) {
+    ctx.fillStyle = zbDragging ? '#00f0ff' : '#5a5a7a';
+    for (let k = 0; k < 3; k++) ctx.fillRect(W/2 - 18, zoneBottom - 11 + k*4, 36, 2);
+  }
+
+  let i = 0, shellSlot = 0;
+  // 縄張り割り当て(歩行組のみ・x順で等分)
+  const walkers = [...critters.values()].filter(c => !SHELL_STATES[c.sess.state]);
+  if (walkers.length) {
+    const span = Math.max(1, W - SW*SCALE - 40);
+    walkers.sort((a,b) => a.x - b.x).forEach((c,idx) => {
+      c.slot = 20 + span * (idx + 0.5) / walkers.length;
+      c.slotHalf = Math.max(30, span / walkers.length / 2 - 10);
+    });
+  }
+  // 働いてる子(オレンジラベル)を後に描く=手前。灰色は奥
+  const ordered = [...critters.entries()].sort((a,b) =>
+    (a[1].sess.state==='working') - (b[1].sess.state==='working'));
+  for (const [id,c] of ordered) {
+    const s = c.sess;
+
+    // ── 貝殻(冬眠)=底に整列して眠る ──
+    if (SHELL_STATES[s.state]) {
+      // 各段センター寄せ(最終段は端数ぶんだけ中央に)
+      const row = Math.floor(shellSlot / perRow);
+      const inRow = Math.min(perRow, shellCount - row*perRow);
+      const rowW = inRow * (SW*sc + 14) - 14;
+      const sx = Math.max(16, (W - rowW) / 2) + (shellSlot % perRow) * (SW*sc + 14);
+      const sy = zoneBottom - 12 - SH*sc - row * (SH*sc + 6);
+      shellSlot++;
+      const spr = SPR[s.state];
+      ctx.drawImage(spr, sx, sy, SW*sc, SH*sc);
+      c.hit = { x:sx, y:sy, w:SW*sc, h:SH*sc };
+      if (s.state === 'sleep') {  // Zzzがふわふわ
+        ctx.fillStyle = '#8888aa'; ctx.font = `${5*sc}px monospace`; ctx.textAlign='left';
+        const f = Math.floor(t/600)%3;
+        ctx.fillText('z'.repeat(f+1), sx + SW*sc - 6, sy - 2 - Math.sin(t/500)*3);
+      }
+      if (selected === id) {
+        ctx.strokeStyle = '#ff3eb5'; ctx.lineWidth = 2;
+        ctx.strokeRect(sx-3, sy-3, SW*sc+6, SH*sc+6);
+      }
+      continue;
+    }
+
+    const working = s.state === 'working';
+    c.phase += 0.016;
+
+    const mate = c.mateId ? critters.get(c.mateId) : null;
+    if (working) {
+      c.tx = c.x; // 執筆中は机から動かない
+    } else if (mate) {
+      // 会話中: 相手のそばへ寄って向かい合う(縄張りより優先)
+      const D = SW*SCALE + 6;
+      if (Math.abs(c.x - mate.x) > D + 8) {
+        c.tx = mate.x + (c.x < mate.x ? -D : D);
+        c.x += Math.sign(c.tx - c.x) * 0.35;
+        c.dir = Math.sign(c.tx - c.x) || c.dir;
+      } else { c.tx = c.x; c.dir = mate.x >= c.x ? 1 : -1; }
+    } else {
+      // 縄張り制: 自分のスロット内でだけうろつく(押し合い方式はプルプル震えるのでやめた)
+      if (c.slot !== undefined && Math.abs(c.x - c.slot) > c.slotHalf) {
+        if (Math.abs(c.tx - c.slot) > c.slotHalf) c.tx = c.slot + (Math.random()-0.5)*40;
+      } else if (Math.abs(c.x - c.tx) < 2) {
+        if (Math.random() < 0.004 && c.slot !== undefined)
+          c.tx = c.slot + (Math.random()-0.5)*1.6*c.slotHalf;
+      }
+      if (Math.abs(c.x - c.tx) >= 2) {
+        c.x += Math.sign(c.tx - c.x) * 0.35;
+        c.dir = Math.sign(c.tx - c.x) || c.dir;
+      }
+    }
+    const bob = working ? 0 : Math.round(Math.sin(c.phase*3))// 歩きの上下
+    const y = floorY + bob;
+
+    // スプライト選択: working=鉛筆カリカリ+たまに顔を上げて一息 / idle=素+まばたき+キョロキョロ
+    let spr;
+    if (working) {
+      const wc = Math.floor(t/400 + c.phase*10) % 22;   // 約8.8秒周期・各自ずらし
+      if (wc === 20) spr = SPR.idle;                     // 顔を上げる
+      else if (wc === 21) spr = SPR.blink;               // まばたきして再開
+      else spr = (Math.floor(t/280) % 2) ? SPR.writeA : SPR.writeB;
+    } else {
+      const gc = Math.floor(t/900 + c.phase*10) % 26;    // キョロキョロはたまにだけ(約23秒周期)
+      if (gc === 10) spr = SPR.lookL;
+      else if (gc === 18) spr = SPR.lookR;
+      else spr = (Math.floor(t/120) % 30 === 0) ? SPR.blink : SPR.idle;
+    }
+
+    ctx.save();
+    ctx.translate(Math.round(c.x), y);
+    if (c.dir < 0) { ctx.scale(-1,1); ctx.translate(-SW*SCALE,0); }
+    ctx.drawImage(spr, 0, 0, SW*SCALE, SH*SCALE);
+    ctx.restore();
+    c.hit = { x:c.x-6, y:y-10, w:SW*SCALE+12, h:SH*SCALE+24 };
+
+    // ツール実況(⚙Bash等)。吹き出しが出てる間はそっち優先
+    if (toggles.tool && working && s.last_tool && !(c.bubbleUntil > t)) {
+      ctx.fillStyle = '#8888aa'; ctx.font = '11px monospace'; ctx.textAlign = 'center';
+      ctx.fillText((TOOL_ICON[s.last_tool]||'🔧') + ' ' + s.last_tool, c.x + SW*SCALE/2, y - 8);
+    }
+    // 困ってる検知: busyのまま5分以上書き込みが無い=詰まってるかも
+    const stuck = toggles.stuck && s.alive && s.proc_status === 'busy' && s.age > 300;
+    if (stuck) {
+      ctx.font = `${Math.max(12, 4*SCALE)}px monospace`; ctx.textAlign = 'left';
+      ctx.fillText('💦', c.x + SW*SCALE - 4, y + Math.sin(t/200)*2);
+    }
+    // compact直後のキラキラ(粒がふわふわ回る)
+    if (c.sparkleUntil > t) {
+      for (let k = 0; k < 5; k++) {
+        const a = t/400 + k*1.26;
+        const px = c.x + SW*SCALE/2 + Math.cos(a)*(18 + 7*Math.sin(t/600 + k*2));
+        const py = y + SH*SCALE/2 - 6 + Math.sin(a*1.3)*16;
+        ctx.fillStyle = ['#ffe066','#00f0ff','#ffffff'][k % 3];
+        const sz = (Math.floor(t/250 + k) % 2) ? 3 : 2;  // またたき
+        ctx.fillRect(px, py, sz, sz);
+      }
+    }
+    // セッション間会話中: そばまで来てたらペアの間に💬(片方だけが描く)
+    if (mate && id < c.mateId && Math.abs(c.x - mate.x) < SW*SCALE + 40) {
+      const mid = (c.x + mate.x + SW*SCALE) / 2;
+      ctx.font = '12px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(Math.floor(t/800) % 2 ? '💬' : '💭', mid, y - 10 - Math.sin(t/400)*2);
+    }
+    // 会話吹き出し
+    if (c.bubbleUntil > t && c.bubble) drawBubble(c, y);
+
+    // 選択リング
+    if (selected === id) {
+      ctx.strokeStyle = '#ff3eb5'; ctx.lineWidth = 2;
+      ctx.strokeRect(c.x-4, y-4, SW*SCALE+8, SH*SCALE+8);
+    }
+    // ラベル
+    ctx.fillStyle = stuck ? '#ff5555' : working ? '#d97757' : '#8888aa';
+    ctx.font = '10px monospace'; ctx.textAlign = 'center';
+    const label = (s.title||'').slice(0,14);
+    ctx.fillText(label, c.x + SW*SCALE/2, y + SH*SCALE + 12 + (i%2 ? 12 : 0)); // 2段互い違い
+
+    // サブエージェント=子Clawdがヒヨコの行列よろしく遅れてついて歩く
+    if (!c.subs) c.subs = {};
+    s.subagents.forEach((sub,k) => {
+      let ch = c.subs[sub.id];
+      if (!ch) ch = c.subs[sub.id] = { x: c.x - (k+1)*30*(c.dir||1), dir: c.dir, pop: t };
+      const target = c.x - (k+1)*26*(c.dir||1) - 6*(c.dir||1);
+      const dx = target - ch.x;
+      ch.x += dx * 0.05;                       // 遅れて追いかける
+      if (Math.abs(dx) > 1.5) ch.dir = Math.sign(dx);   // 進行方向を向く
+      const walking = Math.abs(dx) > 1.5;
+      const sy = y + (SH*SCALE - SH*SUBSCALE);
+      const sspr = sub.state==='working' && !walking
+        ? ((Math.floor(t/280+k*7) % 2) ? SPR.writeA : SPR.writeB)
+        : SPR.idle;
+      // 産まれた瞬間はぴょこんと跳ねる
+      const born = Math.max(0, 1 - (t - ch.pop)/500);
+      const hop = walking ? Math.abs(Math.round(Math.sin(t/90 + k*2)*2)) : 0;
+      ctx.save();
+      ctx.translate(Math.round(ch.x), sy - hop - Math.round(born*10) + (walking?0:Math.round(Math.sin(c.phase*4+k))));
+      if (ch.dir < 0) { ctx.scale(-1,1); ctx.translate(-SW*SUBSCALE,0); }
+      ctx.drawImage(sspr, 0, 0, SW*SUBSCALE, SH*SUBSCALE);
+      ctx.restore();
+    });
+    // 消えた子は掃除
+    for (const id of Object.keys(c.subs))
+      if (!s.subagents.some(x => x.id === id)) delete c.subs[id];
+    i++;
+  }
+  // 誰もいない
+  if (critters.size === 0) {
+    ctx.fillStyle = '#8888aa'; ctx.font = '14px monospace'; ctx.textAlign='center';
+    ctx.fillText('…だれもいない (30分以内に動いたセッション無し)', W/2, H/2);
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+// ── 会話吹き出し(白地・ドット風角) ──
+function drawBubble(c, y) {
+  const raw = c.bubble.replace(/\s+/g, ' ').trim();
+  const CHARS = 16, MAXL = 3;
+  const lines = [];
+  for (let i = 0; i < raw.length && lines.length < MAXL; i += CHARS) lines.push(raw.slice(i, i+CHARS));
+  if (raw.length > CHARS*MAXL) lines[MAXL-1] = lines[MAXL-1].slice(0, CHARS-1) + '…';
+  ctx.font = '11px monospace';
+  const bw = Math.max(...lines.map(l => ctx.measureText(l).width)) + 16;
+  const bh = lines.length*14 + 10;
+  let bx = c.x + SW*SCALE/2 - bw/2;
+  bx = Math.max(4, Math.min(W - bw - 4, bx));
+  const by = y - bh - 14;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(bx, by, bw, bh);
+  // ドット風の角欠け
+  ctx.clearRect(bx, by, 2, 2); ctx.clearRect(bx+bw-2, by, 2, 2);
+  ctx.clearRect(bx, by+bh-2, 2, 2); ctx.clearRect(bx+bw-2, by+bh-2, 2, 2);
+  // しっぽ
+  ctx.fillRect(c.x + SW*SCALE/2 - 3, by + bh, 6, 4);
+  ctx.fillRect(c.x + SW*SCALE/2 - 1, by + bh + 4, 4, 4);
+  ctx.fillStyle = '#0d0d1a';
+  ctx.textAlign = 'left';
+  lines.forEach((l,i) => ctx.fillText(l, bx+8, by + 18 + i*14 - 4));
+}
+
+// ── ゲージ高さの可変(縦持ち: 砂ラインをドラッグ・localStorage永続) ──
+let zbUser = +localStorage.gageZB || 0, lastZB = 0, zbDragging = false, zbMoved = false;
+cv.addEventListener('pointerdown', ev => {
+  if (!lastZB) return;
+  const r = cv.getBoundingClientRect();
+  const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  // キャラ/貝殻の上ならそっち優先(貝殻タップがドラッグに化けるのを防ぐ)
+  for (const c of critters.values()) {
+    const h = c.hit;
+    if (h && mx >= h.x && mx <= h.x+h.w && my >= h.y && my <= h.y+h.h) return;
+  }
+  // グリップ(≡)の近くだけ掴める(横も中央付近に限定)
+  if (Math.abs(mx - W/2) < 60 && Math.abs(my - (lastZB - 7)) < 22) {
+    zbDragging = true; zbMoved = false;
+    cv.setPointerCapture(ev.pointerId);
+  }
+});
+cv.addEventListener('pointermove', ev => {
+  if (!zbDragging) return;
+  const r = cv.getBoundingClientRect();
+  zbUser = Math.round(ev.clientY - r.top + 7);
+  zbMoved = true;
+});
+cv.addEventListener('pointerup', ev => {
+  if (!zbDragging) return;
+  zbDragging = false;
+  if (zbMoved) localStorage.gageZB = zbUser;
+});
+cv.style.touchAction = 'none';  // ドラッグ中に画面スクロールを奪われない
+
+// ── クリックで詳細 ──
+cv.addEventListener('click', ev => {
+  if (zbMoved) { zbMoved = false; return; }  // ドラッグ直後のclickは無視
+  const r = cv.getBoundingClientRect();
+  const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  selected = null;
+  for (const [id,c] of critters) {
+    const h = c.hit;
+    if (h && mx >= h.x && mx <= h.x+h.w && my >= h.y && my <= h.y+h.h) selected = id;
+  }
+  renderPanel(selected ? critters.get(selected).sess : null);
+});
+
+function renderPanel(s) {
+  const p = document.getElementById('panel');
+  if (!s) { p.innerHTML = '<h2>SESSION</h2><div class="empty">Clawdをクリックすると詳細が出るよ</div>'; return; }
+  const esc = t => (t||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const age = s.age < 90 ? s.age+'秒前' : s.age < 5400 ? Math.round(s.age/60)+'分前'
+            : s.age < 129600 ? Math.round(s.age/3600)+'時間前' : Math.round(s.age/86400)+'日前';
+  const stInfo = { working:['#d97757','WORKING'], idle:['#00f0ff','IDLE'],
+    sleep:['#8888aa','😴 冬眠したて'], buried:['#c9a06a','🏖 砂に半埋まり'], clam:['#8a5a3b','🐚 二枚貝'] }[s.state] || ['#fff', s.state];
+  p.innerHTML = `<h2>SESSION</h2>
+    <div class="field"><b>TITLE${s.nick ? ' <span style="color:#ff3eb5">(命名済)</span>' : ''}</b>
+      <div>${esc(s.title)} <button class="btn" style="padding:1px 6px;font-size:11px" onclick="doRename()">✏ 名前</button></div>
+      ${s.nick && s.auto_title ? `<div class="empty" style="font-size:10px">自動タイトル: ${esc(s.auto_title)}</div>` : ''}</div>
+    <div class="field"><b>STATE</b><div style="color:${stInfo[0]}">${stInfo[1]} · 最終更新 ${age}</div></div>
+    <div class="field"><b>PROJECT</b><div>${esc(s.proj)}</div></div>
+    <div class="field"><b>ID</b><div>${s.id.slice(0,13)}…</div></div>
+    ${s.last_tool ? `<div class="field"><b>LAST TOOL</b><div>${esc(s.last_tool)}</div></div>` : ''}
+    ${s.last_text ? `<div class="field"><b>最後の発言${(s.last_text_full||'').length > s.last_text.length ? ' <span style="color:#8888aa">(スクロールで全文)</span>' : ''}</b>
+      <div class="bubble" style="max-height:30vh;overflow-y:auto;-webkit-overflow-scrolling:touch;white-space:pre-wrap">${esc(s.last_text_full || s.last_text)}</div></div>` : ''}
+    <div class="field"><b>PROCESS</b><div>${s.alive ? `<span style="color:#39ff14">● LIVE</span> pid ${s.pid}${s.proc_name?' · '+esc(s.proc_name):''}` : '<span style="color:#8888aa">○ プロセス無し(記録だけ新しい)</span>'}</div></div>
+    ${s.ctx_tokens ? `<div class="field"><b>CONTEXT (直近ターン)</b><div style="color:${s.ctx_tokens>150000?'#ff5555':s.ctx_tokens>80000?'#e8b93c':'#39ff14'}">${(s.ctx_tokens/1000).toFixed(1)}k tokens${s.alive?'':' — 復活はこれ+圧縮ぶんが目安'}</div>
+      ${s.alive && s.can_say ? `<div id="compactArea"><button class="btn" style="border-color:#e8b93c;color:#e8b93c" onclick="askCompact()">🗜 compactする</button></div>` : ''}</div>` : ''}
+    <div class="field"><b>SUBAGENTS (${s.subagents.length})</b>
+      ${s.subagents.map(x => `<div class="sub"><span class="${x.state==='working'?'on':''}">●</span> ${x.id.slice(0,16)} · ${x.state}</div>`).join('') || '<div class="sub">なし</div>'}
+    </div>
+    ${s.alive && s.can_say ? `<div class="field"><b>🍤 エサ(指示)をあげる</b>
+      <div class="sayrow"><input id="sayText" placeholder="このセッションへの指示…" onkeydown="if(event.key==='Enter')doSay()">
+      <button class="btn" style="border-color:#00f0ff;color:#00f0ff" onclick="doSay()">送る</button></div>
+      <div id="sayResult"></div></div>` : ''}
+    <div id="termArea"><button class="btn" style="border-color:#00f0ff;color:#00f0ff" onclick="doOpenTerm()">${s.alive ? '🖥 ターミナルで開く' : '🖥 復活してターミナルで開く'}</button></div>
+    ${s.alive ? `<div id="closeArea"><button class="btn danger" onclick="askClose()">✕ セッションを閉じる</button></div>`
+              : `<div id="closeArea"><button class="btn" style="border-color:#39ff14;color:#39ff14" onclick="doResume()">▶ 復活させる (claude --resume)</button></div>`}`;
+}
+
+async function doRename() {
+  const s = critters.get(selected)?.sess;
+  if (!s) return;
+  const name = prompt('この子の名前(空欄で自動タイトルに戻す):', s.nick || '');
+  if (name === null) return;  // キャンセル
+  try {
+    const r = await fetch('/api/rename', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: s.id, name}) });
+    const d = await r.json();
+    if (d.ok) {
+      s.title = name || s.auto_title || s.id.slice(0,8);
+      s.nick = name;
+      const c = critters.get(selected);
+      if (c) { c.bubble = name ? `${name}になった!` : '名前が消えた…'; c.bubbleUntil = performance.now() + 3000; }
+      renderPanel(s);
+    } else alert(d.error || '失敗した');
+  } catch (e) { alert('通信失敗'); }
+}
+
+async function doOpenTerm() {
+  const s = critters.get(selected)?.sess;
+  if (!s) return;
+  const area = document.getElementById('termArea');
+  // スマホ: 母艦のkittyを開いても手元に何も出ないので、POCKET DECK WEB(:8787)経由にする
+  const mobile = matchMedia('(max-width: 700px)').matches;
+  area.innerHTML = '<div class="empty">開いてる…</div>';
+  try {
+    const r = await fetch('/api/open_terminal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: s.id, no_kitty: mobile}) });
+    const d = await r.json();
+    if (!d.ok) { area.innerHTML = `<div style="color:#ff3eb5">⚠ ${d.error||'失敗'}</div>`; return; }
+    if (mobile) {
+      const app = `pocketdeck://attach?session=${encodeURIComponent(d.tmux)}`;
+      const deck = `http://${location.hostname}:8787/`;
+      area.innerHTML = `<div style="color:#39ff14">✓ ${d.via==='resume'?'復活した!':'居るよ!'} tmux「<b>${d.tmux}</b>」<br>
+        <a href="${app}" style="color:#00f0ff;font-size:15px">▶ POCKET DECKアプリで開く</a><br>
+        <a href="${deck}" target="_blank" class="empty" style="font-size:11px">(ブラウザ版で開く場合はこっち)</a></div>`;
+    } else {
+      area.innerHTML = `<div style="color:#39ff14">✓ ${ {attach:'kittyの新タブでattachした', focus:'居るタブにフォーカスした', resume:'復活してタブに出した'}[d.via] || '開いた' }${d.tmux ? ` (${d.tmux})` : ''}</div>`;
+    }
+  } catch (e) {
+    area.innerHTML = '<div style="color:#ff3eb5">⚠ 通信失敗</div>';
+  }
+}
+
+async function doSay() {
+  const s = critters.get(selected)?.sess;
+  const input = document.getElementById('sayText');
+  const out = document.getElementById('sayResult');
+  if (!s || !input || !input.value.trim()) return;
+  const text = input.value.trim();
+  out.innerHTML = '<span class="empty">投げてる…</span>';
+  try {
+    const r = await fetch('/api/say', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: s.id, text}) });
+    const d = await r.json();
+    if (d.ok) {
+      out.innerHTML = '<span style="color:#39ff14">✓ 届けた!もぐもぐ中…</span>';
+      input.value = '';
+      const c = critters.get(selected);
+      if (c) { c.bubble = '🍤'; c.bubbleUntil = performance.now() + 2500; }
+      sfx.spawn();
+    } else {
+      out.innerHTML = `<span style="color:#ff3eb5">⚠ ${d.error||'失敗'}</span>`;
+    }
+  } catch (e) {
+    out.innerHTML = '<span style="color:#ff3eb5">⚠ 通信失敗</span>';
+  }
+}
+
+async function doResume() {
+  const s = critters.get(selected)?.sess;
+  if (!s) return;
+  const area = document.getElementById('closeArea');
+  area.innerHTML = '<div class="empty">起こしてる…</div>';
+  try {
+    const r = await fetch('/api/resume', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: s.id}) });
+    const d = await r.json();
+    area.innerHTML = d.ok
+      ? `<div style="color:#39ff14">✓ 起きた! tmux「${d.tmux}」で走ってる。<br>ターミナルから <code>tmux attach -t ${d.tmux}</code> で入れるよ</div>`
+      : `<div style="color:#ff3eb5">⚠ ${d.error||'失敗'}</div>`;
+  } catch (e) {
+    area.innerHTML = '<div style="color:#ff3eb5">⚠ 通信失敗</div>';
+  }
+}
+
+// ── compact(2段階確認) ──
+function askCompact() {
+  const s = critters.get(selected)?.sess;
+  const area = document.getElementById('compactArea');
+  if (!s || !area) return;
+  area.innerHTML = `
+    <div class="confirmbox">
+      <p>🗜 「${(s.title||'').slice(0,20)}」に /compact を流し込む?<br>(数分かかることがある)</p>
+      <button class="btn yes" onclick="doCompact()">はい、ぎゅっとする</button>
+      <button class="btn" onclick="renderPanel(critters.get(selected)?.sess||null)">やめる</button>
+    </div>`;
+}
+async function doCompact() {
+  const s = critters.get(selected)?.sess;
+  const area = document.getElementById('compactArea');
+  if (!s || !area) return;
+  area.innerHTML = '<div class="empty">流し込んでる…</div>';
+  try {
+    const r = await fetch('/api/say', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: s.id, text: '/compact'}) });
+    const d = await r.json();
+    if (d.ok) {
+      area.innerHTML = '<div style="color:#39ff14">✓ 届けた!圧縮が終わると✨スッキリ演出が出るよ</div>';
+      const c = critters.get(selected);
+      if (c) { c.bubble = 'ぎゅ〜っ…🗜'; c.bubbleUntil = performance.now() + 5000; }
+    } else area.innerHTML = `<span style="color:#ff3eb5">⚠ ${d.error||'失敗'}</span>`;
+  } catch (e) {
+    area.innerHTML = '<div style="color:#ff3eb5">⚠ 通信失敗</div>';
+  }
+}
+
+// ── セッションを閉じる(2段階確認) ──
+function askClose() {
+  if (!selected) return;
+  const s = critters.get(selected)?.sess;
+  if (!s) return;
+  document.getElementById('closeArea').innerHTML = `
+    <div class="confirmbox">
+      <p>⚠ 「${(s.title||'').slice(0,20)}」を本当に閉じる?<br>(pid ${s.pid} にSIGTERMを送るよ)</p>
+      <button class="btn yes" onclick="doClose()">はい、閉じる</button>
+      <button class="btn" onclick="renderPanel(critters.get(selected)?.sess||null)">やめる</button>
+    </div>`;
+}
+async function doClose() {
+  const s = critters.get(selected)?.sess;
+  if (!s) return;
+  const area = document.getElementById('closeArea');
+  area.innerHTML = '<div class="empty">閉じてる…</div>';
+  try {
+    const r = await fetch('/api/close', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: s.id}) });
+    const d = await r.json();
+    area.innerHTML = d.ok
+      ? `<div style="color:#39ff14">✓ 閉じた (pid ${d.pid})。数秒で反映されるよ</div>`
+      : `<div style="color:#ff3eb5">⚠ ${d.error||'失敗'}</div>`;
+  } catch (e) {
+    area.innerHTML = '<div style="color:#ff3eb5">⚠ 通信失敗</div>';
+  }
+}
+</script>
+</body>
+</html>
