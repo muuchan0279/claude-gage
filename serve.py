@@ -10,11 +10,12 @@
 import json
 import os
 import subprocess
+import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.19.1"  # 更新のたびに上げる(機能追加=minor / 修正=patch)
+VERSION = "1.20.0"  # 更新のたびに上げる(機能追加=minor / 修正=patch)
 
 ROOT = os.path.expanduser("~/.claude/projects")
 SESS_REG = os.path.expanduser("~/.claude/sessions")
@@ -138,6 +139,95 @@ def session_info(path):
             "talk_to": talk_to, "talk_ts": talk_ts}
     _cache[path] = (mtime, info)
     return info
+
+
+def inject_text(proc, text):
+    """生きてるセッションのプロンプトへテキスト+Enterを注入。返り値=(HTTP相当コード, エラー) / 成功=(200, None)"""
+    tmux = proc.get("tmux", "")
+    if not tmux:
+        # kittyタブ直走りの子: kitten @ send-textで注入(tmuxが無くてもエサやり可)
+        sock, win = kitty_find_window(proc["pid"])
+        if not sock:
+            return 409, "この子はtmuxにもkittyにも居ない(注入口が無い)"
+        try:
+            r1 = subprocess.run(["kitten", "@", "--to", f"unix:{sock}", "send-text",
+                                 "--match", f"id:{win}", "--", text],
+                                capture_output=True, text=True, timeout=10)
+            if r1.returncode != 0:
+                return 500, f"send-text失敗: {r1.stderr.strip()[:120]}"
+            time.sleep(0.15)  # TUIがペーストを受けてからEnter
+            subprocess.run(["kitten", "@", "--to", f"unix:{sock}", "send-text",
+                            "--match", f"id:{win}", "--", "\r"],
+                           capture_output=True, text=True, timeout=10)
+            return 200, None
+        except subprocess.TimeoutExpired:
+            return 500, "kittyがタイムアウト"
+    pane = tmux.split(".")[-1]  # 'claude-3:@3.%3' -> '%3'
+    try:
+        r1 = subprocess.run(["tmux", "send-keys", "-t", pane, "-l", "--", text],
+                            capture_output=True, text=True, timeout=10)
+        if r1.returncode != 0:
+            return 500, f"send-keys失敗: {r1.stderr.strip()[:120]}"
+        time.sleep(0.15)  # TUIがペーストを受けてからEnter
+        subprocess.run(["tmux", "send-keys", "-t", pane, "Enter"],
+                       capture_output=True, text=True, timeout=10)
+        return 200, None
+    except subprocess.TimeoutExpired:
+        return 500, "tmuxがタイムアウト"
+
+
+# ---- 自動compact見回り ----
+# 2時間さわってない(jsonl無更新)+コンテキストが太ってる生存セッションに/compactを流す。
+# compactが走るとjsonlが更新されて経過時間が0に戻る=自然に再発火しない。
+# 注入失敗(注入口なし等)へのリトライは1時間に1回まで
+AUTO_COMPACT_S = 2 * 3600
+AUTO_COMPACT_MIN_TOK = 50_000
+AUTO_COMPACT_RETRY_S = 3600
+AUTO_COMPACT_TICK_S = 300
+_auto_compact_last = {}   # sid -> 最後に注入を試みたtime.time()
+auto_compact_log = []     # 直近の実績(APIで見せる用)
+
+
+def auto_compact_patrol():
+    while True:
+        time.sleep(AUTO_COMPACT_TICK_S)
+        try:
+            now = time.time()
+            procs = proc_map()
+            for sid, proc in procs.items():
+                if proc.get("status") == "busy":
+                    continue
+                if now - _auto_compact_last.get(sid, 0) < AUTO_COMPACT_RETRY_S:
+                    continue
+                path = None
+                for proj in os.listdir(ROOT):
+                    cand = os.path.join(ROOT, proj, sid + ".jsonl")
+                    if os.path.isfile(cand):
+                        path = cand
+                        break
+                if not path:
+                    continue
+                try:
+                    age = now - os.path.getmtime(path)
+                except OSError:
+                    continue
+                if age < AUTO_COMPACT_S:
+                    continue
+                info = session_info(path) or {}
+                if info.get("ctx_tokens", 0) < AUTO_COMPACT_MIN_TOK:
+                    continue
+                _auto_compact_last[sid] = now
+                code, err = inject_text(proc, "/compact")
+                label = proc.get("name") or sid[:8]
+                auto_compact_log.append(
+                    {"ts": now, "sid": sid, "name": label,
+                     "ok": err is None, "err": err or "",
+                     "ctx_k": round(info.get("ctx_tokens", 0) / 1000)})
+                del auto_compact_log[:-20]
+                print(f"[auto-compact] {label} ctx={info.get('ctx_tokens',0)//1000}k "
+                      f"age={int(age//60)}min -> {'ok' if err is None else err}", flush=True)
+        except Exception as e:  # 見回りは何があっても死なない
+            print(f"[auto-compact] patrol error: {e}", flush=True)
 
 
 def desktop_pid():
@@ -479,6 +569,7 @@ class Handler(BaseHTTPRequestHandler):
                 "working": sum(1 for s in sessions if s["state"] == "working"),
                 "idle": sum(1 for s in sessions if s["state"] == "idle"),
                 "sessions": sessions,
+                "auto_compact": auto_compact_log[-5:],
             }, ensure_ascii=False).encode()
             self._send(200, "application/json; charset=utf-8", body)
         elif self.path in ("/", "/index.html"):
@@ -624,38 +715,10 @@ class Handler(BaseHTTPRequestHandler):
         proc = proc_map().get(sid)
         if not proc:
             return fail(404, "生きてるプロセスが見つからない")
-        tmux = proc.get("tmux", "")
-        if not tmux:
-            # kittyタブ直走りの子: kitten @ send-textで注入(tmuxが無くてもエサやり可)
-            sock, win = kitty_find_window(proc["pid"])
-            if not sock:
-                return fail(409, "この子はtmuxにもkittyにも居ない(注入口が無い)")
-            try:
-                r1 = subprocess.run(["kitten", "@", "--to", f"unix:{sock}", "send-text",
-                                     "--match", f"id:{win}", "--", text],
-                                    capture_output=True, text=True, timeout=10)
-                if r1.returncode != 0:
-                    return fail(500, f"send-text失敗: {r1.stderr.strip()[:120]}")
-                time.sleep(0.15)  # TUIがペーストを受けてからEnter
-                subprocess.run(["kitten", "@", "--to", f"unix:{sock}", "send-text",
-                                "--match", f"id:{win}", "--", "\r"],
-                               capture_output=True, text=True, timeout=10)
-                self._send(200, "application/json", b'{"ok": true}')
-            except subprocess.TimeoutExpired:
-                fail(500, "kittyがタイムアウト")
-            return
-        pane = tmux.split(".")[-1]  # 'claude-3:@3.%3' -> '%3'
-        try:
-            r1 = subprocess.run(["tmux", "send-keys", "-t", pane, "-l", "--", text],
-                                capture_output=True, text=True, timeout=10)
-            if r1.returncode != 0:
-                return fail(500, f"send-keys失敗: {r1.stderr.strip()[:120]}")
-            time.sleep(0.15)  # TUIがペーストを受けてからEnter
-            subprocess.run(["tmux", "send-keys", "-t", pane, "Enter"],
-                           capture_output=True, text=True, timeout=10)
-            self._send(200, "application/json", b'{"ok": true}')
-        except subprocess.TimeoutExpired:
-            fail(500, "tmuxがタイムアウト")
+        code, err = inject_text(proc, text)
+        if err:
+            return fail(code, err)
+        self._send(200, "application/json", b'{"ok": true}')
 
     def _resume(self, sid):
         def fail(code, msg):
@@ -741,4 +804,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=auto_compact_patrol, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
