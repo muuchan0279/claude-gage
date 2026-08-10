@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.18.1"  # 更新のたびに上げる(機能追加=minor / 修正=patch)
+VERSION = "1.19.0"  # 更新のたびに上げる(機能追加=minor / 修正=patch)
 
 ROOT = os.path.expanduser("~/.claude/projects")
 SESS_REG = os.path.expanduser("~/.claude/sessions")
@@ -332,8 +332,14 @@ def proc_map():
             continue
         sid = meta.get("sessionId")
         if sid:
+            # 制御端末なし(tty_nr=0)=iOS/リモート生まれのヘッドレス組。看取り対象の目印
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    tty_nr = int(f.read().rsplit(")", 1)[1].split()[4])
+            except (OSError, ValueError, IndexError):
+                tty_nr = -1
             out[sid] = {"pid": pid, "name": meta.get("name", ""), "tmux": meta.get("tmux", ""),
-                        "status": meta.get("status", "")}
+                        "status": meta.get("status", ""), "ios": tty_nr == 0}
     return out
 
 
@@ -411,7 +417,10 @@ def scan(max_shells=MAX_SHELLS):
                 "proj": proj.strip("-").replace("-", "/"),
                 "age": round(age),
                 "state": "working" if age <= WORKING_S else "idle",
-                "title": names.get(sid) or info.get("title") or sid[:8],
+                # iOS/リモート生まれ(端末なし)は頭に「ios」を書いとく=看取り候補が一目でわかる
+                "title": (("ios " if proc and proc.get("ios") else "")
+                          + (names.get(sid) or info.get("title") or sid[:8])),
+                "ios": bool(proc and proc.get("ios")),
                 "nick": names.get(sid, ""),
                 "auto_title": info.get("title", ""),
                 # compact直後(15分以内)だけ演出用に渡す
