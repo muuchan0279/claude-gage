@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.19.0"  # 更新のたびに上げる(機能追加=minor / 修正=patch)
+VERSION = "1.19.1"  # 更新のたびに上げる(機能追加=minor / 修正=patch)
 
 ROOT = os.path.expanduser("~/.claude/projects")
 SESS_REG = os.path.expanduser("~/.claude/sessions")
@@ -417,8 +417,8 @@ def scan(max_shells=MAX_SHELLS):
                 "proj": proj.strip("-").replace("-", "/"),
                 "age": round(age),
                 "state": "working" if age <= WORKING_S else "idle",
-                # iOS/リモート生まれ(端末なし)は頭に「ios」を書いとく=看取り候補が一目でわかる
-                "title": (("ios " if proc and proc.get("ios") else "")
+                # iOS/リモート生まれ(端末なし)は頭に[iOS]を書いとく=看取り候補が一目でわかる
+                "title": (("[iOS] " if proc and proc.get("ios") else "")
                           + (names.get(sid) or info.get("title") or sid[:8])),
                 "ios": bool(proc and proc.get("ios")),
                 "nick": names.get(sid, ""),
